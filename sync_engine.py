@@ -1,0 +1,396 @@
+import asyncio
+import html
+import time
+from contextlib import suppress
+
+from telethon import events
+
+from config import (
+    AFTER_ACTION_DELAY,
+    BUTTON_PATH,
+    CLOSED_TEXT,
+    REQUEST_TEXT,
+    RESPONSE_TIMEOUT,
+    SUPPLIER_BOT,
+    TARGET_CHANNEL,
+)
+from parser import BLOCK_KEYS, BLOCK_TITLES, closed_match, parse_price
+
+
+class PriceSyncEngine:
+    def __init__(self, client, state):
+        self.client = client
+        self.state = state
+        self.lock = asyncio.Lock()
+        self.wakeup = asyncio.Event()
+
+    async def start(self):
+        await self.ensure_structure()
+        self.client.add_event_handler(
+            self.on_supplier_edit,
+            events.MessageEdited(chats=SUPPLIER_BOT),
+        )
+
+    def _message_link(self, message_id: int):
+        target = TARGET_CHANNEL.strip()
+
+        if target.startswith("@"):
+            return f"https://t.me/{target[1:]}/{message_id}"
+
+        if target.startswith("-100"):
+            internal = target[4:]
+            return f"https://t.me/c/{internal}/{message_id}"
+
+        # Если username без @.
+        if target and not target.lstrip("-").isdigit():
+            return f"https://t.me/{target}/{message_id}"
+
+        return None
+
+    async def _find_message_by_title(self, title):
+        async for msg in self.client.iter_messages(TARGET_CHANNEL, limit=150):
+            if (msg.raw_text or "").startswith(title):
+                return msg
+        return None
+
+    async def ensure_structure(self):
+        """
+        Создаёт 6 сообщений один раз. После этого они только редактируются.
+        Если state потерялся после redeploy, находит сообщения по заголовкам.
+        """
+        message_ids = dict(self.state.get("message_ids") or {})
+
+        for key in BLOCK_KEYS:
+            title = BLOCK_TITLES[key]
+            msg = None
+            saved_id = message_ids.get(key)
+
+            if saved_id:
+                with suppress(Exception):
+                    msg = await self.client.get_messages(
+                        TARGET_CHANNEL,
+                        ids=int(saved_id),
+                    )
+
+            if not msg:
+                msg = await self._find_message_by_title(title)
+
+            if not msg:
+                msg = await self.client.send_message(
+                    TARGET_CHANNEL,
+                    f"<b>{html.escape(title)}</b>",
+                    parse_mode="html",
+                    link_preview=False,
+                )
+
+            message_ids[key] = msg.id
+
+        self.state.set("message_ids", message_ids)
+        await self.ensure_navigation()
+
+    async def ensure_navigation(self):
+        buttons = []
+        blocks_enabled = self.state.get("blocks") or {}
+        message_ids = self.state.get("message_ids") or {}
+
+        for gen in ("15", "16", "17"):
+            row = []
+            for sim_type, label in (("sim", "SIM"), ("esim", "eSIM")):
+                key = f"{gen}_{sim_type}"
+                if not blocks_enabled.get(key, True):
+                    continue
+                message_id = message_ids.get(key)
+                if not message_id:
+                    continue
+                link = self._message_link(int(message_id))
+                if link:
+                    from telethon import Button
+                    row.append(Button.url(f"{gen} {label}", link))
+            if row:
+                buttons.append(row)
+
+        nav_id = self.state.get("nav_message_id")
+        nav = None
+
+        if nav_id:
+            with suppress(Exception):
+                nav = await self.client.get_messages(
+                    TARGET_CHANNEL,
+                    ids=int(nav_id),
+                )
+
+        if not nav:
+            async for msg in self.client.iter_messages(TARGET_CHANNEL, limit=80):
+                if (msg.raw_text or "").startswith("🧭 Навигация по прайсу"):
+                    nav = msg
+                    break
+
+        text = "🧭 <b>Навигация по прайсу</b>\n\nВыберите нужный раздел:"
+
+        if nav:
+            await self.client.edit_message(
+                TARGET_CHANNEL,
+                nav.id,
+                text,
+                parse_mode="html",
+                buttons=buttons or None,
+                link_preview=False,
+            )
+        else:
+            nav = await self.client.send_message(
+                TARGET_CHANNEL,
+                text,
+                parse_mode="html",
+                buttons=buttons or None,
+                link_preview=False,
+            )
+
+        self.state.set("nav_message_id", nav.id)
+
+    async def _latest_incoming(self, limit=12):
+        messages = await self.client.get_messages(SUPPLIER_BOT, limit=limit)
+        for msg in messages:
+            if not msg.out:
+                return msg
+        return None
+
+    async def _click_button(self, message, wanted):
+        if not message or not message.buttons:
+            raise RuntimeError(f"Не нашёл кнопки для шага: {wanted}")
+
+        wanted_norm = " ".join(wanted.split()).casefold()
+
+        for row in message.buttons:
+            for button in row:
+                label = " ".join((button.text or "").split()).casefold()
+                if label == wanted_norm:
+                    await button.click()
+                    return
+
+        labels = [
+            button.text
+            for row in message.buttons
+            for button in row
+            if getattr(button, "text", None)
+        ]
+        raise RuntimeError(f"Кнопка «{wanted}» не найдена. Есть: {labels}")
+
+    async def request_price(self):
+        before = await self._latest_incoming()
+        before_id = before.id if before else None
+
+        sent = await self.client.send_message(SUPPLIER_BOT, REQUEST_TEXT)
+
+        response = None
+        loops = max(1, int(RESPONSE_TIMEOUT / max(AFTER_ACTION_DELAY, 0.5)))
+
+        for _ in range(loops):
+            await asyncio.sleep(AFTER_ACTION_DELAY)
+            candidate = await self._latest_incoming()
+            if candidate and (
+                candidate.id != before_id
+                or candidate.date >= sent.date
+            ):
+                response = candidate
+                break
+
+        if response is None:
+            response = await self._latest_incoming()
+
+        if response is None:
+            raise RuntimeError("Поставщик не прислал ответ")
+
+        for button_name in BUTTON_PATH:
+            current_id = response.id
+            await self._click_button(response, button_name)
+            await asyncio.sleep(AFTER_ACTION_DELAY)
+
+            # Бот может либо прислать новое сообщение, либо изменить старое.
+            newest = await self._latest_incoming()
+            if newest and newest.id != current_id:
+                response = newest
+            else:
+                with suppress(Exception):
+                    refreshed = await self.client.get_messages(
+                        SUPPLIER_BOT,
+                        ids=current_id,
+                    )
+                    if refreshed:
+                        response = refreshed
+
+        await asyncio.sleep(AFTER_ACTION_DELAY)
+        with suppress(Exception):
+            refreshed = await self.client.get_messages(
+                SUPPLIER_BOT,
+                ids=response.id,
+            )
+            if refreshed:
+                response = refreshed
+
+        self.state.set("last_supplier_message_id", response.id)
+        return response
+
+    async def _set_block_text(self, key, lines, closed=False):
+        message_ids = self.state.get("message_ids") or {}
+        message_id = message_ids.get(key)
+        if not message_id:
+            await self.ensure_structure()
+            message_id = (self.state.get("message_ids") or {}).get(key)
+
+        title = BLOCK_TITLES[key]
+        enabled = (self.state.get("blocks") or {}).get(key, True)
+
+        # При закрытии или выключенном блоке оставляем только шапку.
+        if closed or not enabled:
+            body = f"<b>{html.escape(title)}</b>"
+        else:
+            content = "\n".join(html.escape(x) for x in lines).strip()
+            if content:
+                body = f"<b>{html.escape(title)}</b>\n\n{content}"
+            else:
+                body = f"<b>{html.escape(title)}</b>\n\n<i>Нет позиций</i>"
+
+        # Telegram ограничивает текст сообщения ~4096 символами.
+        if len(body) > 4050:
+            body = body[:4010] + "\n\n<i>…часть прайса не поместилась</i>"
+
+        await self.client.edit_message(
+            TARGET_CHANNEL,
+            int(message_id),
+            body,
+            parse_mode="html",
+            link_preview=False,
+        )
+
+    async def set_closed(self):
+        for key in BLOCK_KEYS:
+            await self._set_block_text(key, [], closed=True)
+
+        await self.ensure_navigation()
+
+        closed_id = self.state.get("closed_message_id")
+        closed_msg = None
+        if closed_id:
+            with suppress(Exception):
+                closed_msg = await self.client.get_messages(
+                    TARGET_CHANNEL,
+                    ids=int(closed_id),
+                )
+
+        text = "🚫 <b>Продажи временно закрыты</b>\n\nОжидаем открытия продаж."
+
+        if closed_msg:
+            await self.client.edit_message(
+                TARGET_CHANNEL,
+                closed_msg.id,
+                text,
+                parse_mode="html",
+            )
+        else:
+            closed_msg = await self.client.send_message(
+                TARGET_CHANNEL,
+                text,
+                parse_mode="html",
+            )
+
+        self.state.update(
+            closed_message_id=closed_msg.id,
+            supplier_closed=True,
+            last_result="продажи закрыты — цены скрыты",
+        )
+
+    async def clear_closed_message(self):
+        closed_id = self.state.get("closed_message_id")
+        if closed_id:
+            with suppress(Exception):
+                await self.client.delete_messages(
+                    TARGET_CHANNEL,
+                    [int(closed_id)],
+                )
+        self.state.update(
+            closed_message_id=None,
+            supplier_closed=False,
+        )
+
+    async def apply_price(self, raw_text):
+        parsed = parse_price(raw_text)
+
+        await self.clear_closed_message()
+
+        for key in BLOCK_KEYS:
+            await self._set_block_text(key, parsed.get(key, []), closed=False)
+
+        await self.ensure_navigation()
+
+        counts = {k: len(v) for k, v in parsed.items()}
+        total = sum(counts.values())
+        self.state.set("last_result", f"прайс обновлён, позиций: {total}")
+        return counts
+
+    async def sync_once(self, forced=False):
+        async with self.lock:
+            now = int(time.time())
+            self.state.update(
+                last_check_ts=now,
+                next_check_ts=None,
+                last_result="запрашиваю прайс…",
+            )
+
+            try:
+                msg = await self.request_price()
+                raw = msg.raw_text or ""
+
+                if closed_match(raw, CLOSED_TEXT):
+                    await self.set_closed()
+                    return {"closed": True}
+
+                counts = await self.apply_price(raw)
+                return {"closed": False, "counts": counts}
+
+            except Exception as e:
+                self.state.set("last_result", f"ошибка: {e}")
+                raise
+
+    async def on_supplier_edit(self, event):
+        last_id = self.state.get("last_supplier_message_id")
+        if not last_id or event.message.id != int(last_id):
+            return
+
+        raw = event.message.raw_text or ""
+
+        try:
+            async with self.lock:
+                if closed_match(raw, CLOSED_TEXT):
+                    await self.set_closed()
+                else:
+                    await self.apply_price(raw)
+        except Exception as e:
+            self.state.set("last_result", f"ошибка редактирования: {e}")
+
+    async def periodic_loop(self):
+        while True:
+            if not self.state.get("sync_enabled", True):
+                self.state.set("next_check_ts", None)
+                self.wakeup.clear()
+                await self.wakeup.wait()
+                continue
+
+            interval = int(self.state.get("interval", 1800))
+            next_ts = int(time.time()) + interval
+            self.state.set("next_check_ts", next_ts)
+
+            self.wakeup.clear()
+            try:
+                await asyncio.wait_for(self.wakeup.wait(), timeout=interval)
+                continue
+            except asyncio.TimeoutError:
+                pass
+
+            if self.state.get("sync_enabled", True):
+                try:
+                    await self.sync_once()
+                except Exception:
+                    pass
+
+    def wake(self):
+        self.wakeup.set()
