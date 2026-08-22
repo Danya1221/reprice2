@@ -14,15 +14,15 @@ BLOCK_KEYS = (
 )
 
 BLOCK_TITLES = {
-    "12": "🍏 iPhone 12",
-    "13": "🍏 iPhone 13",
-    "14": "🍏 iPhone 14",
-    "15_sim": "🍏 iPhone 15 — SIM",
-    "15_esim": "🍏 iPhone 15 — eSIM",
-    "16_sim": "🍏 iPhone 16 — SIM",
-    "16_esim": "🍏 iPhone 16 — eSIM",
-    "17_sim": "🍏 iPhone 17 — SIM",
-    "17_esim": "🍏 iPhone 17 — eSIM",
+    "12": "🍏 Apple iPhone 12",
+    "13": "🍏 Apple iPhone 13",
+    "14": "🍏 Apple iPhone 14",
+    "15_sim": "🍏 Apple iPhone 15 — SIM",
+    "15_esim": "🍏 Apple iPhone 15 — eSIM",
+    "16_sim": "🍏 Apple iPhone 16 — SIM",
+    "16_esim": "🍏 Apple iPhone 16 — eSIM",
+    "17_sim": "🍏 Apple iPhone 17 — SIM",
+    "17_esim": "🍏 Apple iPhone 17 — eSIM",
     "other": "📦 Остальное",
 }
 
@@ -184,24 +184,60 @@ def is_active_item(line: str):
     return "актив" in txt
 
 
-def iphone17_family(line: str):
+def iphone_family(line: str, generation: str):
     """
-    Возвращает семейство для сортировки внутри блоков 17 SIM/eSIM.
-    Важно проверять Pro Max раньше Pro.
+    Определяет модель внутри поколения.
+    Проверяем самые длинные названия первыми, чтобы Pro Max не стал Pro.
     """
     txt = norm(line)
+    gen = re.escape(str(generation))
 
-    if re.match(r"^(?:iphone\s*)?17e(?!\d)", txt, re.I):
-        return "17e"
+    patterns = []
 
-    if re.match(r"^(?:iphone\s*)?17\s+pro\s+max\b", txt, re.I):
-        return "17_pro_max"
+    if generation in {"12", "13"}:
+        patterns = [
+            (rf"^(?:iphone\s*)?{gen}\s+pro\s+max\b", f"{generation}_pro_max"),
+            (rf"^(?:iphone\s*)?{gen}\s+pro\b", f"{generation}_pro"),
+            (rf"^(?:iphone\s*)?{gen}\s+mini\b", f"{generation}_mini"),
+            (rf"^(?:iphone\s*)?{gen}(?!\d)", generation),
+        ]
 
-    if re.match(r"^(?:iphone\s*)?17\s+pro\b", txt, re.I):
-        return "17_pro"
+    elif generation in {"14", "15"}:
+        patterns = [
+            (rf"^(?:iphone\s*)?{gen}\s+pro\s+max\b", f"{generation}_pro_max"),
+            (rf"^(?:iphone\s*)?{gen}\s+pro\b", f"{generation}_pro"),
+            (rf"^(?:iphone\s*)?{gen}\s+plus\b", f"{generation}_plus"),
+            (rf"^(?:iphone\s*)?{gen}(?!\d)", generation),
+        ]
 
-    if re.match(r"^(?:iphone\s*)?17(?!\d)", txt, re.I):
-        return "17"
+    elif generation == "16":
+        patterns = [
+            (r"^(?:iphone\s*)?16e(?!\d)", "16e"),
+            (r"^(?:iphone\s*)?16[еe](?!\d)", "16e"),
+            (r"^(?:iphone\s*)?16\s+pro\s+max\b", "16_pro_max"),
+            (r"^(?:iphone\s*)?16\s+pro\b", "16_pro"),
+            (r"^(?:iphone\s*)?16\s+plus\b", "16_plus"),
+            (r"^(?:iphone\s*)?16(?!\d)", "16"),
+        ]
+
+    elif generation == "17":
+        patterns = [
+            (r"^(?:iphone\s*)?17e(?!\d)", "17e"),
+            (r"^(?:iphone\s*)?17[еe](?!\d)", "17e"),
+            (r"^(?:iphone\s*)?17\s+pro\s+max\b", "17_pro_max"),
+            (r"^(?:iphone\s*)?17\s+pro\b", "17_pro"),
+            (r"^(?:iphone\s*)?17\s+air\b", "17_air"),
+            (r"^(?:iphone\s*)?17(?!\d)", "17"),
+        ]
+
+    else:
+        patterns = [
+            (rf"^(?:iphone\s*)?{gen}(?!\d)", generation),
+        ]
+
+    for pattern, family in patterns:
+        if re.match(pattern, txt, re.I):
+            return family
 
     return None
 
@@ -213,6 +249,28 @@ def looks_like_product(line: str):
         return False
 
     return any(ch.isdigit() for ch in txt)
+
+
+def display_product_line(line: str) -> str:
+    """
+    Для публикации добавляет префикс iPhone к товарной строке,
+    если поставщик пишет только модель:
+      16 Pro Max ... -> iPhone 16 Pro Max ...
+      17e ...        -> iPhone 17e ...
+    Уже существующий iPhone не дублируем.
+    """
+    txt = norm(line)
+
+    if not txt:
+        return txt
+
+    if txt.casefold().startswith("iphone "):
+        return txt
+
+    if generation_in_line(txt):
+        return f"iPhone {txt}"
+
+    return txt
 
 
 def add_markup_to_line(line: str, markup_amount: int) -> str:
@@ -300,30 +358,62 @@ def parse_price(text: str):
     return parse_full_price(text)["blocks"]
 
 
-IPHONE17_SECTION_TITLES = {
-    "17e": "17e",
-    "17": "17",
-    "17_pro": "17 Pro",
-    "17_pro_max": "17 Pro Max",
+IPHONE_SECTION_TITLES = {
+    "12_mini": "iPhone 12 mini",
+    "12": "iPhone 12",
+    "12_pro": "iPhone 12 Pro",
+    "12_pro_max": "iPhone 12 Pro Max",
+
+    "13_mini": "iPhone 13 mini",
+    "13": "iPhone 13",
+    "13_pro": "iPhone 13 Pro",
+    "13_pro_max": "iPhone 13 Pro Max",
+
+    "14": "iPhone 14",
+    "14_plus": "iPhone 14 Plus",
+    "14_pro": "iPhone 14 Pro",
+    "14_pro_max": "iPhone 14 Pro Max",
+
+    "15": "iPhone 15",
+    "15_plus": "iPhone 15 Plus",
+    "15_pro": "iPhone 15 Pro",
+    "15_pro_max": "iPhone 15 Pro Max",
+
+    "16e": "iPhone 16e",
+    "16": "iPhone 16",
+    "16_plus": "iPhone 16 Plus",
+    "16_pro": "iPhone 16 Pro",
+    "16_pro_max": "iPhone 16 Pro Max",
+
+    "17e": "iPhone 17e",
+    "17": "iPhone 17",
+    "17_air": "iPhone 17 Air",
+    "17_pro": "iPhone 17 Pro",
+    "17_pro_max": "iPhone 17 Pro Max",
+}
+
+IPHONE_FAMILY_ORDER = {
+    "12": ("12_mini", "12", "12_pro", "12_pro_max"),
+    "13": ("13_mini", "13", "13_pro", "13_pro_max"),
+    "14": ("14", "14_plus", "14_pro", "14_pro_max"),
+    "15": ("15", "15_plus", "15_pro", "15_pro_max"),
+    "16": ("16e", "16", "16_plus", "16_pro", "16_pro_max"),
+    "17": ("17e", "17", "17_air", "17_pro", "17_pro_max"),
 }
 
 
-def group_17_lines(lines):
+def group_generation_lines(lines, generation):
     """
-    Стабильно группирует строки 17-й серии:
-    17e -> 17 -> 17 Pro -> 17 Pro Max.
-    Возвращает список кортежей (section_key, rows).
+    Группирует строки одного поколения в правильном порядке моделей.
+    Возвращает [(family_key, rows), ...].
     """
-    groups = {
-        "17e": [],
-        "17": [],
-        "17_pro": [],
-        "17_pro_max": [],
-    }
+    order = IPHONE_FAMILY_ORDER.get(str(generation), (str(generation),))
+    groups = {key: [] for key in order}
     other = []
 
     for line in lines or []:
-        family = iphone17_family(line)
+        family = iphone_family(line, str(generation))
+
         if family in groups:
             groups[family].append(line)
         else:
@@ -331,7 +421,7 @@ def group_17_lines(lines):
 
     result = []
 
-    for key in ("17e", "17", "17_pro", "17_pro_max"):
+    for key in order:
         if groups[key]:
             result.append((key, groups[key]))
 

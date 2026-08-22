@@ -20,7 +20,7 @@ from config import (
 )
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-from parser import BLOCK_KEYS, BLOCK_TITLES, IPHONE17_SECTION_TITLES, add_markup_to_line, closed_match, group_17_lines, parse_full_price
+from parser import BLOCK_KEYS, BLOCK_TITLES, IPHONE_SECTION_TITLES, add_markup_to_line, closed_match, display_product_line, group_generation_lines, parse_full_price
 
 
 DISPLAY_BLOCK_ORDER = (
@@ -99,6 +99,77 @@ class PriceSyncEngine:
 
         return max(1, int((boundary - now).total_seconds()))
 
+    async def ensure_connected(self):
+        """
+        Гарантирует рабочее соединение Telethon перед запросами.
+
+        Railway/Telegram могут разорвать MTProto-соединение.
+        Вместо падения с `Cannot send requests while disconnected`
+        переподключаемся и продолжаем работу.
+        """
+        if self.client.is_connected():
+            return True
+
+        print("🔌 Telethon отключён — переподключаюсь…", flush=True)
+
+        try:
+            await self.client.connect()
+
+            if not await self.client.is_user_authorized():
+                raise RuntimeError(
+                    "Telegram-сессия больше не авторизована. "
+                    "Нужно обновить SESSION_STRING."
+                )
+
+            print("✅ Telethon снова подключён", flush=True)
+            return True
+
+        except Exception as e:
+            self.state.update(
+                supplier_status="error",
+                last_result=f"ошибка подключения Telegram: {e}",
+            )
+            print(f"❌ Не удалось переподключить Telethon: {e}", flush=True)
+            raise
+
+
+    async def telegram_call(self, awaitable_factory, operation="Telegram-запрос"):
+        """
+        Выполняет Telethon-запрос с одной автоматической попыткой reconnect.
+        awaitable_factory должен быть функцией без аргументов, создающей coroutine.
+        """
+        await self.ensure_connected()
+
+        try:
+            return await awaitable_factory()
+        except Exception as e:
+            message = str(e).casefold()
+
+            disconnected = (
+                "cannot send requests while disconnected" in message
+                or "disconnected" in message
+                or "connection" in message and "closed" in message
+            )
+
+            if not disconnected:
+                raise
+
+            print(
+                f"🔌 {operation}: соединение потеряно, повторяю после reconnect…",
+                flush=True,
+            )
+
+            try:
+                await self.client.disconnect()
+            except Exception:
+                pass
+
+            await asyncio.sleep(1)
+            await self.ensure_connected()
+
+            return await awaitable_factory()
+
+
     async def start(self):
         await self.ensure_structure()
 
@@ -143,6 +214,7 @@ class PriceSyncEngine:
         - если сообщение уже есть — используем его;
         - если нет — создаём.
         """
+        await self.ensure_connected()
         message_ids = dict(self.state.get("message_ids") or {})
         blocks_enabled = self.state.get("blocks") or {}
 
@@ -205,6 +277,7 @@ class PriceSyncEngine:
         """
         Удаляет текущую навигацию и старые текстовые дубли.
         """
+        await self.ensure_connected()
         ids = []
 
         saved_id = self.state.get("nav_message_id")
@@ -472,6 +545,7 @@ class PriceSyncEngine:
         ]
 
     async def request_price(self):
+        await self.ensure_connected()
         print(f"📡 Запрашиваю прайс у {SUPPLIER_BOT}", flush=True)
 
         sent = await self.client.send_message(
@@ -599,6 +673,7 @@ class PriceSyncEngine:
 
         Закрытое сообщение удаляем и затем восстанавливаем при необходимости.
         """
+        await self.ensure_connected()
         blocks_enabled = self.state.get("blocks") or {}
         old_message_ids = dict(self.state.get("message_ids") or {})
 
@@ -718,6 +793,7 @@ class PriceSyncEngine:
         - создаёт сообщение блока;
         - сразу заполняет его из последнего сохранённого прайса.
         """
+        await self.ensure_connected()
         blocks = dict(self.state.get("blocks") or {})
         blocks[key] = bool(enabled)
         self.state.set("blocks", blocks)
@@ -779,10 +855,12 @@ class PriceSyncEngine:
         """
         Массовое включение/выключение с немедленным применением в канале.
         """
+        await self.ensure_connected()
         for key in self.block_order():
             await self.set_block_enabled(key, enabled)
 
     async def _set_block_text(self, key, lines, closed=False):
+        await self.ensure_connected()
         blocks_enabled = self.state.get("blocks") or {}
 
         # ВЫКЛЮЧЕННЫЙ блок не должен существовать в канале.
@@ -828,14 +906,31 @@ class PriceSyncEngine:
         else:
             markup_amount = int(self.state.get("markup_amount", 0) or 0)
 
-            if key in {"17_sim", "17_esim"}:
+            generation = None
+
+            if key in {"12", "13", "14"}:
+                generation = key
+            elif key.startswith("15_"):
+                generation = "15"
+            elif key.startswith("16_"):
+                generation = "16"
+            elif key.startswith("17_"):
+                generation = "17"
+
+            if generation:
                 rendered_parts = []
 
-                for section_key, section_lines in group_17_lines(lines):
-                    section_title = IPHONE17_SECTION_TITLES.get(
-                        section_key,
-                        section_key,
-                    )
+                for section_key, section_lines in group_generation_lines(
+                    lines,
+                    generation,
+                ):
+                    if section_key == "other":
+                        section_title = "Другие модели"
+                    else:
+                        section_title = IPHONE_SECTION_TITLES.get(
+                            section_key,
+                            section_key,
+                        )
 
                     rendered_parts.append(
                         f"<b>— {html.escape(section_title)} —</b>"
@@ -843,7 +938,10 @@ class PriceSyncEngine:
 
                     rendered_parts.extend(
                         html.escape(
-                            add_markup_to_line(x, markup_amount)
+                            add_markup_to_line(
+                                display_product_line(x),
+                                markup_amount,
+                            )
                         )
                         for x in section_lines
                     )
@@ -853,7 +951,10 @@ class PriceSyncEngine:
                 content = "\n".join(rendered_parts).strip()
             else:
                 display_lines = [
-                    add_markup_to_line(x, markup_amount)
+                    add_markup_to_line(
+                        display_product_line(x),
+                        markup_amount,
+                    )
                     for x in lines
                 ]
 
@@ -890,6 +991,7 @@ class PriceSyncEngine:
             pass
 
     async def _clear_enabled_prices(self):
+        await self.ensure_connected()
         blocks_enabled = self.state.get("blocks") or {}
 
         for key in self.block_order():
@@ -903,6 +1005,7 @@ class PriceSyncEngine:
         await self.ensure_navigation()
 
     async def _show_closed_message(self, text):
+        await self.ensure_connected()
         closed_id = self.state.get("closed_message_id")
         closed_msg = None
 
@@ -972,6 +1075,7 @@ class PriceSyncEngine:
         print("🚫 Поставщик закрыт — цены скрыты", flush=True)
 
     async def clear_closed_message(self):
+        await self.ensure_connected()
         closed_id = self.state.get("closed_message_id")
 
         if closed_id:
@@ -1082,6 +1186,13 @@ class PriceSyncEngine:
                     supplier_status="error",
                     last_result=f"ошибка: {e}",
                 )
+
+                if not self.client.is_connected():
+                    try:
+                        await self.ensure_connected()
+                    except Exception:
+                        pass
+
                 raise
 
     async def on_supplier_edit(self, event):
@@ -1221,8 +1332,14 @@ class PriceSyncEngine:
 
             try:
                 await self.sync_once()
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"⚠️ Ошибка периодической синхронизации: {e}", flush=True)
+
+                if not self.client.is_connected():
+                    try:
+                        await self.ensure_connected()
+                    except Exception:
+                        pass
 
     async def close(self):
         if self.bot:
