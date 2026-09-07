@@ -1,0 +1,9 @@
+HI MULTI CONTROL ALIVE + /LOGIN FIX
+
+Исправлено:
+- добавлена настоящая команда /login;
+- /login запускает тот же phone -> code -> 2FA flow;
+- /start и управляющий Bot API запускаются сразу;
+- ожидание PostgreSQL advisory lock больше не блокирует управляющего бота;
+- при waiting_instance /login сообщает, что надо дождаться освобождения lock;
+- multi-account, dedup, margin, parser и supplier logic не менялись.

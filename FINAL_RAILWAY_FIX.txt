@@ -1,0 +1,24 @@
+FINAL RAILWAY SELF-FIX
+
+Problem from Railway log:
+    ./start.sh: Permission denied
+
+This build fixes it without requiring a Railway Settings change.
+
+railway.json:
+    buildCommand = chmod 755 start.sh
+    startCommand = ./start.sh
+
+Procfile fallback:
+    web: bash start.sh
+
+So even if GitHub/browser upload strips the executable flag,
+Railway restores it during build before deployment.
+
+Bot logic preserved:
+- 2 supplier bots + 1 group/channel source
+- partial-source operation
+- PostgreSQL sessions/state
+- dedupe by lowest purchase price
+- global custom markup
+- existing parser/classes

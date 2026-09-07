@@ -1,0 +1,31 @@
+HI PRICE — TWO BOTS + ONE GROUP
+
+Source 1:
+- existing @hi_catalog_bot / REQUEST_TEXT from Railway.
+
+Sources 2 and 3:
+- each has its own Telegram StringSession in PostgreSQL;
+- each can be configured as:
+  * supplier bot;
+  * normal group/channel.
+
+For the user's setup:
+- source 1 = bot price;
+- source 2 = second bot price;
+- source 3 = group/channel price.
+
+Group source:
+- sends nothing;
+- reads last 100 messages;
+- finds newest price-bearing post;
+- joins price-bearing messages from same 15-minute batch;
+- if unavailable, other sources continue working.
+
+Merge:
+- true duplicate => lowest purchase price;
+- important variants remain separate;
+- existing parser builds product classes/blocks;
+- global configurable markup applies after merge.
+
+Railway:
+- no additional Variables.

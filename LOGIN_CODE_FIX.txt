@@ -1,0 +1,12 @@
+HI CATALOG LOGIN CODE FIX
+
+Исправлено:
+- код Telegram больше не зависит только от in-memory awaiting_code;
+- phone_code_hash хранится в PostgreSQL;
+- временная unauthorised Telethon StringSession хранится в PostgreSQL;
+- незавершённый login восстанавливается после Railway restart;
+- handler принимает код по persisted tg_auth_status=code_required;
+- 2FA тоже восстанавливается;
+- после отправки цифр бот сразу отвечает: "Код получил. Проверяю…".
+
+Логика прайса, парсер, блоки, наценка и TARGET_CHANNEL не менялись.

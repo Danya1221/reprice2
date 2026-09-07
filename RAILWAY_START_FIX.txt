@@ -1,0 +1,11 @@
+RAILWAY START FIX
+
+Проблема:
+./start.sh: Permission denied
+
+Исправление:
+- railway.json запускает: python -u launcher.py
+- Procfile запускает: python -u launcher.py
+- executable permission у start.sh больше не нужен
+
+Логика Telegram, HI, multi-account, dedup, margin и parser не менялась.
