@@ -1,0 +1,16 @@
+HI CATALOG — SESSION RIP RELOGIN
+
+Добавлен SessionRevokedError:
+"The authorization has been invalidated, because of the user terminating all sessions"
+
+Теперь он обрабатывается так же, как остальные мёртвые Telegram-сессии:
+- удалить старую StringSession из PostgreSQL;
+- не пытаться использовать её снова;
+- перевести состояние в login_required;
+- попросить администратора войти в Telegram заново.
+
+Изменены только:
+- telegram_runtime.py
+- sync_engine.py
+
+control_bot.py и логика прайса не менялись в этом патче.
