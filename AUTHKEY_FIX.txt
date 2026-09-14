@@ -1,8 +1,0 @@
-HI CATALOG AUTH KEY FIX
-
-Исправлено:
-- AuthKeyUnregisteredError теперь считается мёртвой Telegram-сессией;
-- мёртвый telethon_session_v1 удаляется из PostgreSQL;
-- бот переводится в login_required вместо сырых ошибок SendMessageRequest;
-- после нового входа сохраняется новая StringSession;
-- логика прайса /prices, парсер, блоки, канал и наценка не менялись.
